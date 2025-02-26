@@ -452,3 +452,61 @@ class BallisticModel:
     table.add_row(["Speed Error (ft/s)"] + vx_errors)
 
     print(table)
+
+
+import numpy as np
+
+
+def n_body(t, y, p):
+  dim, m = p['dimension'], p['m']
+  G, fix = p.get('G', 1.0), p.get('fix_first', False)
+  n = len(m)
+  pos = y[:n * dim].reshape(n, dim)
+  acc = np.zeros_like(pos)
+
+  for i in range(n):
+    for j in range(i + 1, n):
+      r = pos[i] - pos[j]
+      r_norm = np.linalg.norm(r)
+      if r_norm > 0:
+        acc[i] -= G * m[j] * r / r_norm ** 3
+        acc[j] += G * m[i] * r / r_norm ** 3
+
+  if fix: acc[0] *= 0
+  return np.concatenate([y[n * dim:], acc.ravel()])
+
+
+from numpy import array,float64,float128
+# Order is all coordinates then all velocities in groups by mass:
+# x1,y1,x2,y2,x3,y3,vx1,vy1,vx2,vy2,etc
+euler = np.array([0,0,1,0,-1,0,0,0,0,.8,0,-.8])
+montgomery = np.array([0.97000436,-0.24308753,-0.97000436,0.24308753, 0., 0.,\
+0.466203685, 0.43236573, 0.466203685, 0.43236573,\
+-0.93240737,-0.86473146])
+lagrange = np.array([1.,0.,-0.5,0.866025403784439, -0.5,-0.866025403784439,\
+0.,0.8,-0.692820323027551,-0.4, 0.692820323027551, -0.4])
+skinny_pinapple = np.array([0.419698802831,1.190466261252,\
+0.076399621771, 0.296331688995,\
+0.100310663856, -0.729358656127,\
+0.102294566003, 0.687248445943,\
+0.148950262064, 0.240179781043,\
+-0.251244828060, -0.927428226977])
+hand_in_hand_oval = np.array([0.906009977921, 0.347143444587,\
+-0.263245299491, 0.140120037700,\
+-0.252150695248, -0.661320078799,\
+0.242474965162, 1.045019736387,\
+-0.360704684300, -0.807167979922,\
+0.118229719138, -0.237851756465])
+four_body = np.array([1.382857,0,\
+0,0.157030,\
+-1.382857,0,\
+0,-0.157030,\
+0,0.584873,\
+1.871935,0,\
+0,-0.584873,\
+-1.871935,0],dtype=np.float128)
+helium_1 = np.array([0,0,2,0,-1,0,0,0,0,.95,0,-1])
+helium_2 = np.array([0,0,3,0,1,0,0,0,0,.4,0,-1])
+p4 = {'m':np.array([1,1,1,1]),'G':1,'dimension':2,'force':1,'fix_first':False}
+p3 = {'m':np.array([1,1,1]),'G':1,'dimension':2,'force':1,'fix_first':False}
+p_he = {'m':np.array([2,-1,-1]),'G':1,'dimension':2,'force':1,'fix_first':True}
