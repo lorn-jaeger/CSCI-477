@@ -49,7 +49,7 @@ def RungeKutta45(dt, f, t, y, *args):
     return y_new, err
 
 def solve_ode(f, tspan, y0, method=RungeKutta45, *args, **options):
-   t0, tf = tspan
+    t0, tf = tspan
     dt = options.get('first_step', 0.01)
     atol = options.get('atol', 1e-6)
     rtol = options.get('rtol', 1e-6)
