@@ -89,7 +89,11 @@ def solve_ode(f, tspan, y0, method=RungeKutta45, *args, **options):
 
     return np.array(t), np.array(y)
 
+cc = 0
+
 def n_body(t, y, p):
+  global cc
+  cc += 1
   dim, m = p['dimension'], p['m']
   G, fix = p.get('G', 1.0), p.get('fix_first', False)
   n = len(m)
@@ -197,6 +201,7 @@ def show_anim(t_s,y, dt,y0,trace_length=20,out_time=.05):
     plt.close(fig)
     clear_output(wait=True)
     return anim
+
 
 
 #################################################
