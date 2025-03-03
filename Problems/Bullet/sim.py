@@ -1,4 +1,8 @@
 import numpy as np
+from scipy.interpolate import interp1d
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize_scalar, fsolve
+from prettytable import PrettyTable
 import math
 
 def Euler(dt, f, t, y, args):
@@ -32,6 +36,234 @@ def solve_ode(f,tspan, y0, method = Euler, *args, **options):
         t.append(t_new)
 
     return np.array(t), np.array(y)
+
+
+def projectile(t, y, b):
+  x, y, vx, vy = y
+  speed = np.sqrt(vx ** 2 + vy ** 2)
+
+  g = b.g
+  drag = b.get_drag(speed)
+
+  u_x = vx / speed if speed != 0 else 0
+  u_y = vy / speed if speed != 0 else 0
+
+  ax = -drag * u_x
+  ay = g - drag * u_y
+
+  return np.array([vx, vy, ax, ay])
+
+def plot_reference():
+  plt.figure(figsize=(5, 3))
+  plt.plot(G1[:, 0], G1[:, 1], 'black', label='G1')
+  plt.plot(G7[:, 0], G7[:, 1], 'r-', label='G7')
+  plt.axvline(x=1.0, color='k', linestyle='--', label='Speed of Sound')
+  plt.ylabel('Cd')
+  plt.xlabel('Mach Number')
+  plt.title('Reference Projectiles')
+  plt.legend()
+  plt.grid(True)
+
+
+class BallisticModel:
+  def __init__(self, bc, position, velocity, reference, manufacturer_data, units="imperial"):
+    self.units = units
+    self.reference = reference
+    self.man_x, self.man_v, self.man_y = manufacturer_data
+
+    self.x0, self.y0, = position
+    self.vx0, self.vy0 = velocity
+
+    self.bc = self._get_bc(bc)
+    self.rho = self._get_rho()
+    self.vs = self._get_vs()
+    self.g = self._get_g()
+    self.cd = self._get_cd()
+
+    self.x, self.y = None, None
+    self.vx, self.vy = None, None
+
+  def solve_trajectory(self):
+    y0 = np.array([self.x0, self.y0, self.vx0, self.vy0])
+    _, state = solve_ode(projectile, (0, 1.7), y0, EulerRichardson, self)
+    self.x, self.y, self.vx, self.vy = state.T
+
+  def sight(self, target=300):
+    x = target
+    y = 0
+
+    def error_function(theta):
+      v0 = np.sqrt(self.vx0 ** 2 + self.vy0 ** 2)
+      self.vx0 = v0 * np.cos(theta.item())
+      self.vy0 = v0 * np.sin(theta.item())
+
+      self.solve_trajectory()
+
+      idx = np.argmin(np.abs(self.x - x))
+      return self.y[idx] - y
+
+    initial_guess = np.arctan2(self.vy0, self.vx0)
+
+    optimal = fsolve(error_function, initial_guess)[0]
+
+    v0 = np.sqrt(self.vx0 ** 2 + self.vy0 ** 2)
+    self.vx0 = v0 * np.cos(optimal)
+    self.vy0 = v0 * np.sin(optimal)
+
+    self.solve_trajectory()
+
+  def optimize(self):
+    def total_y_error(theta):
+      v0 = np.sqrt(self.vx0 ** 2 + self.vy0 ** 2)
+
+      vx_test = v0 * np.cos(theta)
+      vy_test = v0 * np.sin(theta)
+
+      y0 = np.array([self.x0, self.y0, vx_test, vy_test])
+      _, state = solve_ode(projectile, (0, 10), y0, EulerRichardson, self)
+      x_test, y_test, _, _ = state.T
+
+      total_error = 0
+
+      for i in range(len(self.man_x)):
+        if self.units == "imperial":
+          x_target = self.man_x[i] * 3
+          y_man = self.man_y[i] / 12
+        else:
+          x_target = self.man_x[i]
+          y_man = self.man_y[i]
+
+        if x_target > max(x_test):
+          continue
+
+        idx = np.argmin(np.abs(x_test - x_target))
+        total_error += (y_test[idx] - y_man) ** 2
+
+      global e
+      e = total_error
+      return total_error
+
+    result = minimize_scalar(total_y_error, bounds=(0, np.radians(15)), method='bounded')
+    optimal_theta = result.x
+    v0 = np.sqrt(self.vx0 ** 2 + self.vy0 ** 2)
+    self.vx0 = v0 * np.cos(optimal_theta)
+    self.vy0 = v0 * np.sin(optimal_theta)
+
+    print(f"Optimal angle: {np.degrees(optimal_theta):.2f} degrees")
+    print(f" MSE: {e}")
+    self.solve_trajectory()
+
+  def _get_bc(self, bc):
+    if self.units == "metric":
+      return bc * 0.703  #            lb/in^2 to kg/m^2
+    if self.units == "imperial":
+      return bc * 144  # lb/in^2 to lb/ft^2
+
+  def _get_rho(self):
+    if self.units == "metric":
+      return 1.225
+    if self.units == "imperial":
+      return 0.0742
+
+  def _get_vs(self):
+    if self.units == "metric":
+      return 343.0
+    if self.units == "imperial":
+      return 1125.0
+
+  def _get_g(self):
+    if self.units == "metric":
+      return -9.81
+    if self.units == "imperial":
+      return -32.17
+
+  def _get_cd(self):
+    return interp1d(self.reference[:, 0], self.reference[:, 1], bounds_error=False, fill_value="extrapolate")
+
+  def get_drag(self, speed):
+    mach = speed / self.vs
+    cd = self.cd(mach)
+    drag = 0.5 * (1 / self.bc) * self.rho * speed ** 2 * cd
+    return drag
+
+  def plot_velocity(self, title):
+    if self.units == "imperial":
+      x = self.x / 3
+      vel = self.vx
+      x_unit, y_unit = "(yards)", "(ft/s)"
+    else:
+      x = self.x * 1000
+      vel = self.vx
+      x_unit, y_unit = "(m)", "(m/s)"
+
+    plt.figure()
+    plt.plot(x, vel, 'r-', label='Simulated Velocity')
+    plt.scatter(self.man_x, self.man_v, color='black', s=10, label='Manufacturer Data')
+    plt.xlabel("Distance " + x_unit)
+    plt.ylabel("Velocity " + y_unit)
+    plt.title(title + " Velocity Fit")
+
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+  def plot_position(self, title):
+    if self.units == "imperial":
+      x = self.x / 3
+      y = self.y * 12
+      y_unit, x_unit = "(in)", "(yards)"
+    else:
+      x = self.x * 1000
+      y = self.y
+      y_unit, x_unit = "(m)", "(m)"
+
+    plt.figure()
+    plt.plot(x, y, 'b-', label='Simulated Path')
+    plt.scatter(self.man_x, self.man_y, color='b', s=10, label='Manufacturer Data')
+    plt.xlabel("Distance " + x_unit)
+    plt.ylabel("Trajectory " + y_unit)
+    plt.legend()
+    plt.grid()
+    plt.title(title + " Position Fit")
+    plt.show()
+
+  def print_errors(self):
+    distances = []
+    man_y_values = []
+    y_errors = []
+    man_vx_values = []
+    vx_errors = []
+
+    for i in range(len(self.man_x)):
+      x_target = self.man_x[i] * 3
+
+      if x_target > max(self.x):
+        continue
+
+      idx = np.argmin(np.abs(self.x - x_target))
+      y_sim = self.y[idx] * 12
+      vx_sim = self.vx[idx]
+
+      y_man = self.man_y[i]
+      vx_man = self.man_v[i]
+
+      y_diff = y_sim - y_man
+      vx_diff = vx_sim - vx_man
+
+      distances.append(f"{self.man_x[i]:.0f}")
+      man_y_values.append(f"{y_man:.3f}")
+      y_errors.append(f"{y_diff:.3f}")
+      man_vx_values.append(f"{vx_man:.3f}")
+      vx_errors.append(f"{vx_diff:.3f}")
+
+    table = PrettyTable()
+    table.field_names = ["Distance (yards)"] + distances
+    table.add_row(["Drop (in)"] + man_y_values)
+    table.add_row(["Drop Error (in)"] + y_errors)
+    table.add_row(["Speed (ft/s)"] + man_vx_values)
+    table.add_row(["Speed Error (ft/s)"] + vx_errors)
+
+    print(table)
 
 
 def simple_gravity(t, y, g):
@@ -219,294 +451,3 @@ G7 = np.array([[0.00, 0.1198],
 G7 = preprocessing(G7)
 
 
-import numpy as np
-from scipy.interpolate import interp1d
-import matplotlib.pyplot as plt
-from scipy.optimize import minimize_scalar, fsolve
-from prettytable import PrettyTable
-
-
-def projectile(t, y, b):
-  x, y, vx, vy = y
-  speed = np.sqrt(vx ** 2 + vy ** 2)
-
-  g = b.g
-  drag = b.get_drag(speed)
-
-  u_x = vx / speed if speed != 0 else 0
-  u_y = vy / speed if speed != 0 else 0
-
-  ax = -drag * u_x
-  ay = g - drag * u_y
-
-  return np.array([vx, vy, ax, ay])
-
-def plot_reference():
-  plt.figure(figsize=(5, 3))
-  plt.plot(G1[:, 0], G1[:, 1], 'black', label='G1')
-  plt.plot(G7[:, 0], G7[:, 1], 'r-', label='G7')
-  plt.axvline(x=1.0, color='k', linestyle='--', label='Speed of Sound')
-  plt.ylabel('Cd')
-  plt.xlabel('Mach Number')
-  plt.title('Reference Projectiles')
-  plt.legend()
-  plt.grid(True)
-
-
-class BallisticModel:
-  def __init__(self, bc, position, velocity, reference, manufacturer_data, units="imperial"):
-    self.units = units
-    self.reference = reference
-    self.man_x, self.man_v, self.man_y = manufacturer_data
-
-    self.x0, self.y0, = position
-    self.vx0, self.vy0 = velocity
-
-    self.bc = self._get_bc(bc)
-    self.rho = self._get_rho()
-    self.vs = self._get_vs()
-    self.g = self._get_g()
-    self.cd = self._get_cd()
-
-    self.x, self.y = None, None
-    self.vx, self.vy = None, None
-
-  def solve_trajectory(self):
-    y0 = np.array([self.x0, self.y0, self.vx0, self.vy0])
-    _, state = solve_ode(projectile, (0, 1.7), y0, EulerRichardson, self)
-    self.x, self.y, self.vx, self.vy = state.T
-
-  def sight(self, target=500):
-    x = target
-    y = 0
-
-    def error_function(theta):
-      v0 = np.sqrt(self.vx0 ** 2 + self.vy0 ** 2)
-      self.vx0 = v0 * np.cos(theta.item())
-      self.vy0 = v0 * np.sin(theta.item())
-
-      self.solve_trajectory()
-
-      idx = np.argmin(np.abs(self.x - x))
-      return self.y[idx] - y
-
-    initial_guess = np.arctan2(self.vy0, self.vx0)
-
-    optimal = fsolve(error_function, initial_guess)[0]
-
-    v0 = np.sqrt(self.vx0 ** 2 + self.vy0 ** 2)
-    self.vx0 = v0 * np.cos(optimal)
-    self.vy0 = v0 * np.sin(optimal)
-
-    self.solve_trajectory()
-
-  def optimize(self):
-    def total_y_error(theta):
-      v0 = np.sqrt(self.vx0 ** 2 + self.vy0 ** 2)
-
-      vx_test = v0 * np.cos(theta)
-      vy_test = v0 * np.sin(theta)
-
-      y0 = np.array([self.x0, self.y0, vx_test, vy_test])
-      _, state = solve_ode(projectile, (0, 10), y0, EulerRichardson, self)
-      x_test, y_test, _, _ = state.T
-
-      total_error = 0
-
-      for i in range(len(self.man_x)):
-        if self.units == "imperial":
-          x_target = self.man_x[i] * 3
-          y_man = self.man_y[i] / 12
-        else:
-          x_target = self.man_x[i]
-          y_man = self.man_y[i]
-
-        if x_target > max(x_test):
-          continue
-
-        idx = np.argmin(np.abs(x_test - x_target))
-        total_error += (y_test[idx] - y_man) ** 2
-
-      global e
-      e = total_error
-      return total_error
-
-    result = minimize_scalar(total_y_error, bounds=(0, np.radians(15)), method='bounded')
-    optimal_theta = result.x
-    v0 = np.sqrt(self.vx0 ** 2 + self.vy0 ** 2)
-    self.vx0 = v0 * np.cos(optimal_theta)
-    self.vy0 = v0 * np.sin(optimal_theta)
-
-    print(f"Optimal angle: {np.degrees(optimal_theta):.2f} degrees")
-    print(f" MSE: {e}")
-    self.solve_trajectory()
-
-  def _get_bc(self, bc):
-    if self.units == "metric":
-      return bc * 0.703  #            lb/in^2 to kg/m^2
-    if self.units == "imperial":
-      return bc * 144  # lb/in^2 to lb/ft^2
-
-  def _get_rho(self):
-    if self.units == "metric":
-      return 1.225
-    if self.units == "imperial":
-      return 0.0742
-
-  def _get_vs(self):
-    if self.units == "metric":
-      return 343.0
-    if self.units == "imperial":
-      return 1125.0
-
-  def _get_g(self):
-    if self.units == "metric":
-      return -9.81
-    if self.units == "imperial":
-      return -32.17
-
-  def _get_cd(self):
-    return interp1d(self.reference[:, 0], self.reference[:, 1], bounds_error=False, fill_value="extrapolate")
-
-  def get_drag(self, speed):
-    mach = speed / self.vs
-    cd = self.cd(mach)
-    drag = 0.5 * (1 / self.bc) * self.rho * speed ** 2 * cd
-    return drag
-
-  def plot_velocity(self, title):
-    if self.units == "imperial":
-      x = self.x / 3
-      vel = self.vx
-      x_unit, y_unit = "(yards)", "(ft/s)"
-    else:
-      x = self.x * 1000
-      vel = self.vx
-      x_unit, y_unit = "(m)", "(m/s)"
-
-    plt.figure()
-    plt.plot(x, vel, 'r-', label='Simulated Velocity')
-    plt.scatter(self.man_x, self.man_v, color='black', s=10, label='Manufacturer Data')
-    plt.xlabel("Distance " + x_unit)
-    plt.ylabel("Velocity " + y_unit)
-    plt.title(title + " Velocity Fit")
-
-    plt.legend()
-    plt.grid()
-    plt.show()
-
-  def plot_position(self, title):
-    if self.units == "imperial":
-      x = self.x / 3
-      y = self.y * 12
-      y_unit, x_unit = "(in)", "(yards)"
-    else:
-      x = self.x * 1000
-      y = self.y
-      y_unit, x_unit = "(m)", "(m)"
-
-    plt.figure()
-    plt.plot(x, y, 'b-', label='Simulated Path')
-    plt.scatter(self.man_x, self.man_y, color='b', s=10, label='Manufacturer Data')
-    plt.xlabel("Distance " + x_unit)
-    plt.ylabel("Trajectory " + y_unit)
-    plt.legend()
-    plt.grid()
-    plt.title(title + " Position Fit")
-    plt.show()
-
-  def print_errors(self):
-    distances = []
-    man_y_values = []
-    y_errors = []
-    man_vx_values = []
-    vx_errors = []
-
-    for i in range(len(self.man_x)):
-      x_target = self.man_x[i] * 3
-
-      if x_target > max(self.x):
-        continue
-
-      idx = np.argmin(np.abs(self.x - x_target))
-      y_sim = self.y[idx] * 12
-      vx_sim = self.vx[idx]
-
-      y_man = self.man_y[i]
-      vx_man = self.man_v[i]
-
-      y_diff = y_sim - y_man
-      vx_diff = vx_sim - vx_man
-
-      distances.append(f"{self.man_x[i]:.0f}")
-      man_y_values.append(f"{y_man:.3f}")
-      y_errors.append(f"{y_diff:.3f}")
-      man_vx_values.append(f"{vx_man:.3f}")
-      vx_errors.append(f"{vx_diff:.3f}")
-
-    table = PrettyTable()
-    table.field_names = ["Distance (yards)"] + distances
-    table.add_row(["Drop (in)"] + man_y_values)
-    table.add_row(["Drop Error (in)"] + y_errors)
-    table.add_row(["Speed (ft/s)"] + man_vx_values)
-    table.add_row(["Speed Error (ft/s)"] + vx_errors)
-
-    print(table)
-
-
-import numpy as np
-
-
-def n_body(t, y, p):
-  dim, m = p['dimension'], p['m']
-  G, fix = p.get('G', 1.0), p.get('fix_first', False)
-  n = len(m)
-  pos = y[:n * dim].reshape(n, dim)
-  acc = np.zeros_like(pos)
-
-  for i in range(n):
-    for j in range(i + 1, n):
-      r = pos[i] - pos[j]
-      r_norm = np.linalg.norm(r)
-      if r_norm > 0:
-        acc[i] -= G * m[j] * r / r_norm ** 3
-        acc[j] += G * m[i] * r / r_norm ** 3
-
-  if fix: acc[0] *= 0
-  return np.concatenate([y[n * dim:], acc.ravel()])
-
-
-from numpy import array,float64,float128
-# Order is all coordinates then all velocities in groups by mass:
-# x1,y1,x2,y2,x3,y3,vx1,vy1,vx2,vy2,etc
-euler = np.array([0,0,1,0,-1,0,0,0,0,.8,0,-.8])
-montgomery = np.array([0.97000436,-0.24308753,-0.97000436,0.24308753, 0., 0.,\
-0.466203685, 0.43236573, 0.466203685, 0.43236573,\
--0.93240737,-0.86473146])
-lagrange = np.array([1.,0.,-0.5,0.866025403784439, -0.5,-0.866025403784439,\
-0.,0.8,-0.692820323027551,-0.4, 0.692820323027551, -0.4])
-skinny_pinapple = np.array([0.419698802831,1.190466261252,\
-0.076399621771, 0.296331688995,\
-0.100310663856, -0.729358656127,\
-0.102294566003, 0.687248445943,\
-0.148950262064, 0.240179781043,\
--0.251244828060, -0.927428226977])
-hand_in_hand_oval = np.array([0.906009977921, 0.347143444587,\
--0.263245299491, 0.140120037700,\
--0.252150695248, -0.661320078799,\
-0.242474965162, 1.045019736387,\
--0.360704684300, -0.807167979922,\
-0.118229719138, -0.237851756465])
-four_body = np.array([1.382857,0,\
-0,0.157030,\
--1.382857,0,\
-0,-0.157030,\
-0,0.584873,\
-1.871935,0,\
-0,-0.584873,\
--1.871935,0],dtype=np.float128)
-helium_1 = np.array([0,0,2,0,-1,0,0,0,0,.95,0,-1])
-helium_2 = np.array([0,0,3,0,1,0,0,0,0,.4,0,-1])
-p4 = {'m':np.array([1,1,1,1]),'G':1,'dimension':2,'force':1,'fix_first':False}
-p3 = {'m':np.array([1,1,1]),'G':1,'dimension':2,'force':1,'fix_first':False}
-p_he = {'m':np.array([2,-1,-1]),'G':1,'dimension':2,'force':1,'fix_first':True}
